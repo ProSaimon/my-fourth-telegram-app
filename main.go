@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 var (
-	games      = make(map[string]*Game)
+	bot *tgbotapi.BotAPI
+	games = make(map[string]*Game)
 	challenges = make(map[string]*Challenge)
-	mutex      sync.RWMutex
+	mutex sync.RWMutex
 )
 
 type Game struct {
@@ -23,20 +26,41 @@ type Game struct {
 	CurrentPlayer string       `json:"current_player"`
 	Status       string        `json:"status"`
 	CreatedAt    time.Time     `json:"created_at"`
+	ChatID       int64         `json:"chat_id"`
 }
 
 type Challenge struct {
 	ID        string    `json:"id"`
 	FromUser  string    `json:"from_user"`
+	FromName  string    `json:"from_name"`
 	ToUser    string    `json:"to_user"`
+	ToName    string    `json:"to_name"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
+	ChatID    int64     `json:"chat_id"`
 }
 
 func main() {
-	// Простые HTTP роуты
+	// Инициализация бота
+	var err error
+	bot, err = tgbotapi.NewBotAPI("7870811469:AAEy5PaUbqhg-OjugPte-Gp4F0bSHUmZkSk")
+	if err != nil {
+		log.Printf("Bot init error: %v", err)
+		log.Println("Continuing without Telegram bot...")
+	} else {
+		log.Printf("Bot authorized as @%s", bot.Self.UserName)
+		
+		// Запускаем поллинг в горутине
+		go startBotPolling()
+	}
+
+	// HTTP роуты
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "🚀 Go Game Server is running!\n\nAPI Endpoints:\n- POST /api/challenge\n- GET /api/game?id=123\n- POST /api/game/move\n- GET /api/games?user_id=123")
+		botStatus := "Bot: Not available"
+		if bot != nil {
+			botStatus = fmt.Sprintf("Bot: @%s - Active", bot.Self.UserName)
+		}
+		fmt.Fprintf(w, "🚀 Go Game Server is running!\n\n%s\n\nAPI Endpoints:\n- POST /api/challenge\n- GET /api/game?id=123\n- POST /api/game/move\n- GET /api/games?user_id=123", botStatus)
 	})
 
 	http.HandleFunc("/api/challenge", handleChallenge)
@@ -47,6 +71,133 @@ func main() {
 	port := ":8080"
 	log.Printf("Server starting on port %s", port)
 	log.Fatal(http.ListenAndServe(port, nil))
+}
+
+func startBotPolling() {
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+
+	updates := bot.GetUpdatesChan(u)
+	log.Println("Bot polling started...")
+
+	for update := range updates {
+		if update.Message != nil {
+			handleMessage(update.Message)
+		}
+	}
+}
+
+func handleMessage(message *tgbotapi.Message) {
+	log.Printf("Message from %s (%d): %s", message.From.UserName, message.From.ID, message.Text)
+
+	userID := fmt.Sprint(message.From.ID)
+	userName := message.From.UserName
+
+	switch {
+	case message.Text == "/start":
+		msg := tgbotapi.NewMessage(message.Chat.ID, "🎮 Добро пожаловать в игру Го!\n\nКоманды:\n/challenge @username - бросить вызов\n/mygames - мои игры\n/board - показать доску")
+		bot.Send(msg)
+		
+	case message.Text == "/mygames":
+		userGames := getUserGames(userID)
+		if len(userGames) == 0 {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "У вас нет активных игр. Используйте /challenge @username чтобы начать!")
+			bot.Send(msg)
+		} else {
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Ваши активные игры: %d\nИспользуйте /board чтобы посмотреть доску", len(userGames)))
+			bot.Send(msg)
+		}
+		
+	case message.Text == "/board":
+		sendBoard(message.Chat.ID, userID)
+		
+	case len(message.Text) > 11 && message.Text[:11] == "/challenge ":
+		if len(message.Text) > 12 && message.Text[11] == '@' {
+			targetUsername := message.Text[12:]
+			createChallenge(userID, userName, targetUsername, message.Chat.ID)
+		} else {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Используйте: /challenge @username")
+			bot.Send(msg)
+		}
+		
+	default:
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Используйте /start для списка команд")
+		bot.Send(msg)
+	}
+}
+
+func createChallenge(fromUserID, fromUserName, toUsername string, chatID int64) {
+	challengeID := generateID()
+	challenge := &Challenge{
+		ID:        challengeID,
+		FromUser:  fromUserID,
+		FromName:  fromUserName,
+		ToUser:    "", // Пока неизвестно
+		ToName:    toUsername,
+		Status:    "pending",
+		CreatedAt: time.Now(),
+		ChatID:    chatID,
+	}
+
+	mutex.Lock()
+	challenges[challengeID] = challenge
+	mutex.Unlock()
+
+	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🎯 Вызов отправлен пользователю @%s!\nОжидайте подтверждения.", toUsername))
+	bot.Send(msg)
+}
+
+func sendBoard(chatID int64, userID string) {
+	userGames := getUserGames(userID)
+	if len(userGames) == 0 {
+		msg := tgbotapi.NewMessage(chatID, "У вас нет активных игр.")
+		bot.Send(msg)
+		return
+	}
+
+	// Берем первую игру для примера
+	game := userGames[0]
+	
+	// Создаем простое текстовое представление доски
+	boardText := "⚫️⚪️ Доска Го (9x9 для примера):\n\n"
+	for y := 0; y < 9; y++ {
+		for x := 0; x < 9; x++ {
+			switch game.Board[x][y] {
+			case "B":
+				boardText += "⚫️"
+			case "W":
+				boardText += "⚪️"
+			default:
+				boardText += "➕"
+			}
+		}
+		boardText += "\n"
+	}
+	
+	boardText += fmt.Sprintf("\nСейчас ход: %s", getPlayerColor(game.CurrentPlayer))
+	
+	msg := tgbotapi.NewMessage(chatID, boardText)
+	bot.Send(msg)
+}
+
+func getPlayerColor(player string) string {
+	if player == "B" {
+		return "⚫️ Черные"
+	}
+	return "⚪️ Белые"
+}
+
+func getUserGames(userID string) []*Game {
+	mutex.RLock()
+	defer mutex.RUnlock()
+	
+	userGames := []*Game{}
+	for _, game := range games {
+		if game.Player1 == userID || game.Player2 == userID {
+			userGames = append(userGames, game)
+		}
+	}
+	return userGames
 }
 
 func handleChallenge(w http.ResponseWriter, r *http.Request) {
