@@ -1,3 +1,3 @@
-module my-fourth-telegram-app
+module main
 
 go 1.21
