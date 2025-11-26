@@ -1,3 +1,7 @@
-module github.com/your-username/my-fourth-telegram-app
+module my-fourth-telegram-app
 
 go 1.21
+
+require (
+	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
+)
