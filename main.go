@@ -19,14 +19,14 @@ var (
 )
 
 type Game struct {
-	ID           string      `json:"id"`
-	Player1      string      `json:"player1"` // Telegram User ID
-	Player2      string      `json:"player2"`
+	ID           string        `json:"id"`
+	Player1      string        `json:"player1"`
+	Player2      string        `json:"player2"`
 	Board        [19][19]string `json:"board"`
-	CurrentPlayer string     `json:"current_player"`
-	Status       string      `json:"status"`
-	CreatedAt    time.Time   `json:"created_at"`
-	ChatID       int64       `json:"chat_id"` // Для отправки сообщений
+	CurrentPlayer string       `json:"current_player"`
+	Status       string        `json:"status"`
+	CreatedAt    time.Time     `json:"created_at"`
+	ChatID       int64         `json:"chat_id"`
 }
 
 type Challenge struct {
@@ -46,19 +46,15 @@ func main() {
 		log.Panic(err)
 	}
 
-	// Настройка webhook
-	webhookURL := "https://my-fourth-telegram-app-production.up.railway.app/telegram"
-	_, err = bot.SetWebhook(tgbotapi.NewWebhook(webhookURL))
+	// Настройка webhook (исправленная версия)
+	webhookConfig := tgbotapi.NewWebhook("https://my-fourth-telegram-app-production.up.railway.app/telegram")
+	_, err = bot.Request(webhookConfig)
 	if err != nil {
 		log.Panic(err)
 	}
 
 	// Роуты
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
 		fmt.Fprintf(w, "🚀 Go Game Server is running!\n\nBot: @%s", bot.Self.UserName)
 	})
 
@@ -75,9 +71,12 @@ func main() {
 }
 
 func handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
-	update, err := bot.HandleUpdate(r)
-	if err != nil {
-		log.Println("Webhook error:", err)
+	defer r.Body.Close()
+
+	var update tgbotapi.Update
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&update); err != nil {
+		log.Println("Webhook decode error:", err)
 		return
 	}
 
@@ -95,7 +94,6 @@ func handleMessage(message *tgbotapi.Message) {
 		bot.Send(msg)
 		
 	case "/mygames":
-		// Показать активные игры пользователя
 		userGames := getUserGames(fmt.Sprint(message.From.ID))
 		if len(userGames) == 0 {
 			msg := tgbotapi.NewMessage(message.Chat.ID, "У вас нет активных игр. Используйте /challenge @username чтобы начать!")
@@ -104,6 +102,10 @@ func handleMessage(message *tgbotapi.Message) {
 			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Ваши активные игры: %d", len(userGames)))
 			bot.Send(msg)
 		}
+		
+	default:
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Используйте /start для начала")
+		bot.Send(msg)
 	}
 }
 
@@ -121,5 +123,110 @@ func getUserGames(userID string) []*Game {
 	return userGames
 }
 
-// Остальные функции (handleChallenge, handleGame, handleMove, listGames) остаются без изменений
-// ... [остальной код из предыдущей версии]
+// API Handlers (упрощенные версии)
+func handleChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		FromUser string `json:"from_user"`
+		ToUser   string `json:"to_user"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	challengeID := generateID()
+	challenge := &Challenge{
+		ID:        challengeID,
+		FromUser:  req.FromUser,
+		ToUser:    req.ToUser,
+		Status:    "pending",
+		CreatedAt: time.Now(),
+	}
+
+	mutex.Lock()
+	challenges[challengeID] = challenge
+	mutex.Unlock()
+
+	json.NewEncoder(w).Encode(challenge)
+}
+
+func handleGame(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		gameID := r.URL.Query().Get("id")
+		mutex.RLock()
+		game, exists := games[gameID]
+		mutex.RUnlock()
+		
+		if !exists {
+			http.Error(w, "Game not found", http.StatusNotFound)
+			return
+		}
+		
+		json.NewEncoder(w).Encode(game)
+	} else {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		GameID string `json:"game_id"`
+		Player string `json:"player"`
+		X      int    `json:"x"`
+		Y      int    `json:"y"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Упрощенная логика хода
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	game, exists := games[req.GameID]
+	if !exists {
+		http.Error(w, "Game not found", http.StatusNotFound)
+		return
+	}
+
+	if game.Board[req.X][req.Y] != "" {
+		http.Error(w, "Position occupied", http.StatusBadRequest)
+		return
+	}
+
+	game.Board[req.X][req.Y] = req.Player
+	json.NewEncoder(w).Encode(game)
+}
+
+func listGames(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
+	
+	mutex.RLock()
+	defer mutex.RUnlock()
+
+	userGames := []*Game{}
+	for _, game := range games {
+		if game.Player1 == userID || game.Player2 == userID {
+			userGames = append(userGames, game)
+		}
+	}
+
+	json.NewEncoder(w).Encode(userGames)
+}
+
+func generateID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
