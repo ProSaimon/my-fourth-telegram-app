@@ -7,12 +7,9 @@ import (
 	"net/http"
 	"sync"
 	"time"
-	
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 var (
-	bot       *tgbotapi.BotAPI
 	games      = make(map[string]*Game)
 	challenges = make(map[string]*Challenge)
 	mutex      sync.RWMutex
@@ -26,104 +23,32 @@ type Game struct {
 	CurrentPlayer string       `json:"current_player"`
 	Status       string        `json:"status"`
 	CreatedAt    time.Time     `json:"created_at"`
-	ChatID       int64         `json:"chat_id"`
 }
 
 type Challenge struct {
 	ID        string    `json:"id"`
 	FromUser  string    `json:"from_user"`
-	FromName  string    `json:"from_name"`
 	ToUser    string    `json:"to_user"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
 func main() {
-	// Инициализация бота
-	var err error
-	bot, err = tgbotapi.NewBotAPI("7870811469:AAEy5PaUbqhg-OjugPte-Gp4F0bSHUmZkSk")
-	if err != nil {
-		log.Panic(err)
-	}
-
-	// Настройка webhook (исправленная версия)
-	webhookConfig := tgbotapi.NewWebhook("https://my-fourth-telegram-app-production.up.railway.app/telegram")
-	_, err = bot.Request(webhookConfig)
-	if err != nil {
-		log.Panic(err)
-	}
-
-	// Роуты
+	// Простые HTTP роуты
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "🚀 Go Game Server is running!\n\nBot: @%s", bot.Self.UserName)
+		fmt.Fprintf(w, "🚀 Go Game Server is running!\n\nAPI Endpoints:\n- POST /api/challenge\n- GET /api/game?id=123\n- POST /api/game/move\n- GET /api/games?user_id=123")
 	})
 
-	http.HandleFunc("/telegram", handleTelegramWebhook)
 	http.HandleFunc("/api/challenge", handleChallenge)
 	http.HandleFunc("/api/game", handleGame)
 	http.HandleFunc("/api/game/move", handleMove)
 	http.HandleFunc("/api/games", listGames)
 	
 	port := ":8080"
-	log.Printf("Bot authorized as @%s", bot.Self.UserName)
 	log.Printf("Server starting on port %s", port)
 	log.Fatal(http.ListenAndServe(port, nil))
 }
 
-func handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-
-	var update tgbotapi.Update
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&update); err != nil {
-		log.Println("Webhook decode error:", err)
-		return
-	}
-
-	if update.Message != nil {
-		handleMessage(update.Message)
-	}
-}
-
-func handleMessage(message *tgbotapi.Message) {
-	log.Printf("Message from %s: %s", message.From.UserName, message.Text)
-
-	switch message.Text {
-	case "/start":
-		msg := tgbotapi.NewMessage(message.Chat.ID, "🎮 Добро пожаловать в игру Го!\n\nКоманды:\n/challenge @username - бросить вызов\n/mygames - мои игры")
-		bot.Send(msg)
-		
-	case "/mygames":
-		userGames := getUserGames(fmt.Sprint(message.From.ID))
-		if len(userGames) == 0 {
-			msg := tgbotapi.NewMessage(message.Chat.ID, "У вас нет активных игр. Используйте /challenge @username чтобы начать!")
-			bot.Send(msg)
-		} else {
-			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Ваши активные игры: %d", len(userGames)))
-			bot.Send(msg)
-		}
-		
-	default:
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Используйте /start для начала")
-		bot.Send(msg)
-	}
-}
-
-// Вспомогательные функции
-func getUserGames(userID string) []*Game {
-	mutex.RLock()
-	defer mutex.RUnlock()
-	
-	userGames := []*Game{}
-	for _, game := range games {
-		if game.Player1 == userID || game.Player2 == userID {
-			userGames = append(userGames, game)
-		}
-	}
-	return userGames
-}
-
-// API Handlers (упрощенные версии)
 func handleChallenge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -153,6 +78,7 @@ func handleChallenge(w http.ResponseWriter, r *http.Request) {
 	challenges[challengeID] = challenge
 	mutex.Unlock()
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(challenge)
 }
 
@@ -168,6 +94,7 @@ func handleGame(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(game)
 	} else {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -192,13 +119,25 @@ func handleMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Упрощенная логика хода
 	mutex.Lock()
 	defer mutex.Unlock()
 
 	game, exists := games[req.GameID]
 	if !exists {
-		http.Error(w, "Game not found", http.StatusNotFound)
+		// Если игры нет - создаем новую
+		game = &Game{
+			ID:            req.GameID,
+			Player1:       req.Player,
+			Board:         [19][19]string{},
+			CurrentPlayer: "B",
+			Status:        "playing",
+			CreatedAt:     time.Now(),
+		}
+		games[req.GameID] = game
+	}
+
+	if req.X < 0 || req.X >= 19 || req.Y < 0 || req.Y >= 19 {
+		http.Error(w, "Invalid coordinates", http.StatusBadRequest)
 		return
 	}
 
@@ -208,6 +147,15 @@ func handleMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	game.Board[req.X][req.Y] = req.Player
+	
+	// Меняем игрока
+	if req.Player == "B" {
+		game.CurrentPlayer = "W"
+	} else {
+		game.CurrentPlayer = "B"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(game)
 }
 
@@ -224,6 +172,7 @@ func listGames(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(userGames)
 }
 
