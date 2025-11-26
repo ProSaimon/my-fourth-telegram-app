@@ -34,6 +34,13 @@ var (
 )
 
 func main() {
+	    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path != "/" {
+            http.NotFound(w, r)
+            return
+        }
+        fmt.Fprintf(w, "🚀 Go Game Server is running!\n\nAPI Endpoints:\n- POST /api/challenge\n- POST /api/game\n- POST /api/game/move\n- GET /api/games?user_id=123")
+    })
     http.HandleFunc("/api/challenge", handleChallenge)
     http.HandleFunc("/api/game", handleGame)
     http.HandleFunc("/api/game/move", handleMove)
